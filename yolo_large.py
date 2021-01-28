@@ -50,7 +50,7 @@ def yolov4(anchors, input_shape=(896,896,3), n_classes=80, scale='P5'):
     strides = {0:8, 1:16, 2:32, 3:64, 4:128}
     gt = [Input((h//strides[i], w//strides[i], n_anchors, n_classes+5)) for i in range(n_levels)]
     outputs = [Reshape(((h//strides[i], w//strides[i], n_anchors, n_classes+5)))(outputs[i]) for i in range(n_levels)]
-    loss = Lambda(yolo_loss, arguments={'anchors': anchors, 'n_classes': n_classes})(outputs+gt)
+    loss = Lambda(yolo_loss, arguments={'anchors': anchors, 'n_classes': n_classes, 'input_shape': input_shape})(outputs+gt)
 
     model = Model([inpt, *gt], loss)
 
