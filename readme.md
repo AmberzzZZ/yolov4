@@ -56,6 +56,9 @@
 ### training stage
     train stage 1: filter the bg
     train stage 2: refinement
+    实验发现，从一开始就用iou loss容易nan，而且不好收敛，
+    random start阶段，conf的iou target比较less confidence，应该是全图无activation的状态，理论上应该不影响前背景快速分类，
+    但是实验下来也有点问题，所以改成了先用hard label强行把前景拉高
 
 
 

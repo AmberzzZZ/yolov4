@@ -50,7 +50,8 @@ def yolo_loss(args, anchors, n_classes, input_shape, train_stage=1, iou_ratio=1.
             box_gt = K.reshape(gt[...,:4], (-1,4))
             iou = cal_iou(box_gt, box_xywh, GIoU=False, DIoU=False, CIoU=False)
             iou = K.reshape(iou, K.shape(pos_mask))
-            box_loss_ = K.sum((1-iou)*pos_mask, axis=[1,2,3,4]) / K.sum(pos_mask)
+            box_loss_ = K.sum((1-iou)*pos_mask, axis=[1,2,3,4]) / K.maximum(1., K.sum(pos_mask, axis=[1,2,3,4]))
+            box_loss_ = K.mean(conf_loss_)
             # conf loss: bce on giou
             conf_gt = iou
             conf_pred = pred[...,-1:]
