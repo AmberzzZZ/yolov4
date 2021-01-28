@@ -3,7 +3,7 @@ import tensorflow as tf
 import numpy as np
 
 
-def yolo_loss(args, anchors, n_classes, input_shape, train_stage=1, iou_ratio=1.0):
+def yolo_loss(args, anchors, n_classes, input_shape, train_stage=1, iou_ratio=1.0, strides=[8,16,32,64,128]):
     # gt & pred: [b,h,w,a,4+c+1]
     n_levels = len(args) // 2
     n_anchors = anchors.shape[0] // n_levels
@@ -25,7 +25,7 @@ def yolo_loss(args, anchors, n_classes, input_shape, train_stage=1, iou_ratio=1.
         cls_loss_ = K.mean(cls_loss_)
 
         h,w,a = K.int_shape(pos_mask)[1:4]
-        grid_xy = np.meshgrid(np.arrange(h), np.arrange(w))
+        grid_xy = np.meshgrid(np.arange(h), np.arange(w))
         grid_xy = np.stack(grid_xy, axis=-1).reshape((1,h,w,1,2))
         grid_xy = tf.constant(grid_xy, dtype='float32')
         box_pred = pred[...,:4]
@@ -39,7 +39,7 @@ def yolo_loss(args, anchors, n_classes, input_shape, train_stage=1, iou_ratio=1.
             box_loss_ = K.sum(box_loss_, axis=[1,2,3,4])
             box_loss_ = K.mean(box_loss_)
             # conf loss: mse
-            conf_loss_ = K.square(gt[...,-1:] - pred[...,-1:]) * pos_mask
+            conf_loss_ = K.square(gt[...,-1:] - pred[...,-1:])
             conf_loss_ = K.sum(conf_loss_, axis=[1,2,3,4])
             conf_loss_ = K.mean(conf_loss_)
 
