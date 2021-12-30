@@ -1,8 +1,9 @@
 from modules import *
-from keras.layers import Input, UpSampling2D, concatenate
+from keras.layers import Input, UpSampling2D, concatenate, Lambda
+from loss import compute_loss
 
 
-def yolov4(input_shape=(896,896,3), n_classes=80, n_anchors=3):
+def yolov4(input_shape=(896,896,3), n_classes=80, n_anchors=3, cfg=None):
 
     inpt = Input(input_shape)
 
@@ -32,7 +33,11 @@ def yolov4(input_shape=(896,896,3), n_classes=80, n_anchors=3):
         x = Conv2D(n_anchors*(n_classes+1+4), 1, strides=1, activation='sigmoid')(fpn_feats[i])
         outputs.append(x)
 
-    model = Model(inpt, outputs)
+    # loss
+    loss = Lambda(compute_loss, arguments={'nC':n_classes, 'nA':n_anchors, 'anchors':cfg.ANCHOR.ANCHORS},
+                  name='yolo_loss')([*outputs, *targets])
+
+    model = Model(inpt, loss)
 
     return model
 
@@ -88,8 +93,17 @@ def fpn(feats):
 if __name__ == '__main__':
 
     model = yolov4(input_shape=(896,896,3), n_classes=80)
-    model.summary()
+    # model.load_weights("weights/yolov4-p5.h5", by_name=True)
+    # model.summary()
 
+    import numpy as np
+    model.compile('sgd', loss='binary_crossentropy')
+    X = np.ones((4,896,896,3))
+    strides = [8,16,32]
+    h = w = 896
+    base = 256
+    Y = [np.ones((4, h//s, w//s, base*(2**i))) for i,s in enumerate(strides)]
+    model.fit(X, Y)
 
 
 

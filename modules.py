@@ -185,8 +185,9 @@ class BottleneckCSP2(Model):
         x = self.conv1(x)
 
         # residual path
+        y1 = x
         for b in self.bottlenecks:
-            y1 = b(x)
+            y1 = b(y1)
 
         # id path
         y2 = self.conv2(x)
