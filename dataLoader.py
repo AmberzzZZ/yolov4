@@ -1,41 +1,65 @@
-from keras.utils import Sequence
-import pickle
-import pandas as pd
-import cv2
+import torch
+from torch.utils.data import Dataset
+from torch.utils.data.sampler import SubsetRandomSampler
+from PIL import Image
 import numpy as np
-import math
-import random
+import os
 import glob
 from tqdm import tqdm
-import os
-import torch
+import random
+import cv2
+import math
 
 
-class dataSequence(Sequence):
+# dataloader
+def build_loader(config):
 
-    def __init__(self, config, rect=False, mosaic=False, augment=False, stride=32, pad=0):
+    # dataset
+    dataset_train = CustomDataset(config, augment=True)
+
+    # sampler
+    sampler_train = SubsetRandomSampler(np.arange(0,len(dataset_train)))
+
+    if config.DATA.BATCH_SIZE>len(sampler_train):
+        config.defrost()
+        config.DATA.BATCH_SIZE = len(sampler_train)
+        config.freeze()
+
+    # dataloader
+    data_loader_train = torch.utils.data.DataLoader(
+        dataset_train, sampler=sampler_train,
+        batch_size=config.DATA.BATCH_SIZE,
+        num_workers=config.DATA.NUM_WORKERS,
+        pin_memory=config.DATA.PIN_MEMORY,
+        drop_last=True,
+        collate_fn=CustomDataset.collate_fn,
+    )
+
+    return data_loader_train
+
+
+# dataset
+class CustomDataset(Dataset):
+
+    def __init__(self, config, rect=False, augment=False, stride=32, pad=0.):
 
         # load all samples
         data_dir = config.DATA.DATA_PATH
         label_dir = config.DATA.LABEL_PATH
-        self.batch_size = config.DATA.BATCH_SIZE
+        batch_size = config.DATA.BATCH_SIZE
         self.img_size = config.DATA.IMG_SIZE
         self.img_channels = config.DATA.IMG_CHANNELS
-        self.anchors = config.ANCHOR.ANCHORS
-        self.strides = config.ANCHOR.STRIDES
         self.hyp = {'mixup':config.AUG.MIXUP,
-                    'hsv':config.AUG.HSV,
-                    'degrees':config.AUG.DEGREE, 'translate': config.AUG.TRANSLATE, 'scale':config.AUG.SCALE, 'shear':config.AUG.SHEAR,
-                    'perspective':config.AUG.PERSPECTIVE,
-                    'flipud':config.AUG.FLIPUD, 'fliplr':config.AUG.FLIPLR}
-        self.n_classes = config.MODEL.NUM_CLASSES
+                          'hsv':config.AUG.HSV,
+                          'degrees':config.AUG.DEGREE, 'translate': config.AUG.TRANSLATE, 'scale':config.AUG.SCALE, 'shear':config.AUG.SHEAR,
+                          'perspective':config.AUG.PERSPECTIVE,
+                          'flipud':config.AUG.FLIPUD, 'fliplr':config.AUG.FLIPLR}
         self.augment = augment
-        self.mosaic = mosaic and not rect
+        self.mosaic = augment and not rect
         self.rect = rect
 
         self.img_files = [i for i in glob.glob(data_dir + '/*jpg')]
         self.label_files = [i.replace(data_dir, label_dir).replace('jpg', 'txt') for i in self.img_files]
-        self.indices = np.arange(len(self.img_files))
 
         self.n_samples = len(self.img_files)
         if os.path.isfile(config.DATA.DATASET+'.cache'):
@@ -59,7 +83,7 @@ class dataSequence(Sequence):
             ratio = ratio[indices]
 
             # compute input_shape for each batch
-            bi = np.floor(np.arange(self.n_samples) / self.batch_size).astype(np.int)  # batch index
+            bi = np.floor(np.arange(self.n_samples) / batch_size).astype(np.int)  # batch index
             nb = bi[-1] + 1  # number of batches
             shapes = [[1, 1]] * nb
             for i in range(nb):
@@ -71,7 +95,7 @@ class dataSequence(Sequence):
                     shapes[i] = [1, 1 / mini]
 
             # times of output strides
-            self.batch_shapes = np.ceil(np.array(shapes) * self.img_size / stride + pad).astype(np.int) * stride
+            self.batch_shapes = np.ceil(np.array(shapes) * img_size / stride + pad).astype(np.int) * stride
 
     def check_samples(self, cache_name=None):
         pbar = tqdm(zip(self.img_files, self.label_files))
@@ -79,8 +103,9 @@ class dataSequence(Sequence):
         for (img, label) in pbar:
             try:
                 boxes = []
-                image = cv2.imread(img, 1)
-                shape = image.shape[:2][::-1]  # image size, wh
+                image = Image.open(img)
+                image.verify()  # PIL verify
+                shape = image.size  # image size, wh
                 assert (shape[0] > 9) & (shape[1] > 9), 'image size <10 pixels'
                 if os.path.isfile(label):
                     with open(label, 'r') as f:
@@ -97,75 +122,14 @@ class dataSequence(Sequence):
         return x
 
     def __len__(self):
-        return len(self.img_files) // self.batch_size
+        return len(self.img_files)
 
     def __getitem__(self, index):
-        batch_indices = self.indices[index*self.batch_size:(index+1)*self.batch_size]
-        x_batch, y_batch = self.batch_data_generator_v2(batch_indices)
-        return x_batch, y_batch
 
-    def on_epoch_end(self):
-        np.random.shuffle(self.indices)
-
-    def batch_data_generator_v1(self, batch_indices):
-
-        img_batch = []       # [b,h,w,3]
-        boxes_batch = []   # [b,20,1+4], [cls_id, xc, yc, w, h]
-        max_boxes = 20
-
-        for sample_idx in batch_indices:
-            # img: [H,W,3], BGR, [0,255]
-            # boxes: [N,5], [cls_id,xc,yc,w,h], normed
-            img, boxes = self.data_generator(sample_idx)
-            img = img[:,:,::-1]/255.   # BGR->RGB, HWC
-            img_batch.append(img)
-
-            pad_gap = max_boxes - len(boxes)
-            if pad_gap<0:
-                indices = np.arange(len(boxes))
-                np.random.shuffle(indices)
-                boxes = boxes[indices[:max_boxes]]
-            else:
-                pad_content = np.tile(np.array([[-1.,-1,-1,-1,-1]]), [pad_gap,1])
-                boxes = np.concatenate([boxes, pad_content], axis=0)
-            boxes_batch.append(boxes)
-
-        img_batch = np.stack(img_batch,0)
-        boxes_batch = np.stack(boxes_batch,0)
-
-        return img_batch, boxes_batch
-
-    def batch_data_generator_v2(self, batch_indices):
-
-        img_batch = []       # [b,h,w,3]
-        boxes_batch = []     # list of [b,h,w,c+1+4], for each level
-
-        for sample_idx in batch_indices:
-            # img: [H,W,3], BGR, [0,255]
-            # boxes: [N,5], [cls_id,xc,yc,w,h], normed
-            img, boxes = self.data_generator(sample_idx)
-            img = img[:,:,::-1]/255.   # BGR->RGB, HWC
-            img_batch.append(img)
-
-            # encode into [b,h,w,a,c+1+4] offsets
-            img_shape = img.shape[:2]
-            encoded_targets = encode_boxes(self.anchors, boxes, img_shape, self.n_classes)
-
-            boxes_batch.append(encoded_targets)
-
-        img_batch = np.stack(img_batch,0)
-
-        boxes_batch_bylevel = []
-        nL = len(encoded_targets)
-        for i in range(nL):
-            boxes_batch_cur = [b[i] for b in boxes_batch]
-            boxes_batch_cur = np.stack(boxes_batch_cur, axis=0)
-            boxes_batch_bylevel.append(boxes_batch_cur)
-
-        return img_batch, boxes_batch_bylevel
-
-    def data_generator(self, index):
-        # augment img & boxes
+        # returns: img: tensor, (CHW), mutiples of 32
+        #          boxes: tensor, (n_boxes,6)
+        #          img_name: str, current file name
+        #          shapes: tuple, only make sense in for single img
 
         hyp = self.hyp
 
@@ -183,13 +147,8 @@ class dataSequence(Sequence):
         else:
             # load single img
             img, (h0,w0), (h,w) = load_image(self, index)   # resized img, orig hw, resized hw
-            if self.rect:
-                target_shape = self.batch_shapes[index]
-            else:
-                target_shape = (self.img_size, self.img_size)
-            img, ratio, pad = letterbox(img, target_shape, auto=False, scaleup=self.augment)  # pad to 32-multiples
+            img, ratio, pad = letterbox(img, (h,w), auto=False, scaleup=self.augment)  # pad to 32-multiples
             shapes = (h0, w0), ((h / h0, w / w0), pad)  # orig hw, use ratio, wh padding for single sides
-            print('shape of single img', img.shape)
 
             # load boxes
             x = self.labels[index]   # [N,5] array, normed [clsid,xc,yc,w,h]
@@ -238,7 +197,22 @@ class dataSequence(Sequence):
             if nL:
                 labels[:,1] = 1 - labels[:,1]
 
-        return img, labels   # cv_img
+        # convert to tensor
+        img = img[:,:,::-1].transpose((2,0,1))/255.   # BGR->RGB, HWC->CHW
+        img = torch.from_numpy(img)
+
+        labels_out = torch.zeros((nL,6))
+        if nL:
+            labels_out[:,1:] = torch.from_numpy(labels)
+
+        return img, labels_out, self.img_files[index], shapes
+
+    @staticmethod
+    def collate_fn(batch):
+        img, label, path, shapes = zip(*batch)  # transposed
+        for i, l in enumerate(label):
+            l[:, 0] = i  # add target image index for build_targets()
+        return torch.stack(img, 0), torch.cat(label, 0), path, shapes
 
 
 def load_mosaic(self, index):
@@ -444,28 +418,33 @@ def augment_hsv(img, hgain=0.5, sgain=0.5, vgain=0.5):
     return img
 
 
-def encode_boxes(anchors, boxes, input_shape, n_classes):
+# dynamic, not structrual, real implementation should be put into the tensor flow
+def encode_boxes(anchors, boxes):
     # anchors: list of [N,2]-arr, for each grid-level
     # boxes: [N,5], normed [clsid,xc,yc,w,h]
-    # input_shape: (w,h)
-    # return: list of [h,w,nA,c+1+4]
+
+    anchors = [np.array([[13,17],[31,25],[24,51],[61,45]]),            # stride 8
+               np.array([[48,1702],[119,96],[97,189],[217,184]]),
+               np.array([[171,384],[324,451],[616,618],[800,800]])]
 
     nL = len(anchors)
     nA = anchors[0].shape[0]
     strides = [8,16,32]
+    img_size = 640
     nB = boxes.shape[0]
-    input_shape = np.array(input_shape)   # [w,h]
 
     off = np.array([[0,0],            # [5,2], gt grid & neighbor grids
                     [-1,0],[0,-1],[1,0],[0,1]], dtype=np.float32)   # j,k,l,m
 
-    targets = []
+    regress_targets = []
+    cls_targets = []
+    indices = []
     # for each level
     for i in range(nL):
-
-        grid_h, grid_w = input_shape[1] // strides[i], input_shape[0] // strides[i]
-
         if nB:
+
+            grid_h = grid_w = img_size / strides[i]
+            grid_xy = np.meshgrid(np.arange(grid_w), np.arange(grid_h))   # grid indices start from axis-1
 
             grid_boxes = boxes.copy()
             grid_boxes[:,1:] *= [grid_w,grid_h,grid_w,grid_h]   # grid-level [xc,yc,w,h]
@@ -473,7 +452,7 @@ def encode_boxes(anchors, boxes, input_shape, n_classes):
             # print(grid_boxes)
 
             # match box to multi anchors by h/w ratio
-            r = np.expand_dims(boxes[:,[3,4]]*input_shape,axis=1) / anchors[i]    # [N1,N2,2]
+            r = np.expand_dims(boxes[:,[3,4]]*img_size,axis=1) / anchors[i]    # [N1,N2,2]
             j = np.max(np.maximum(r, 1./r), axis=-1) < 4   # max anchor ratio, synchronize with encoding factor in predictions, valid coords in [N1,N2]
             anchor_boxes = np.tile(np.expand_dims(grid_boxes, axis=1), [1,nA,1])  # [N1,N2,5]
             anchor_id = np.tile(np.arange(nA), nB).reshape((nB,nA,1))
@@ -499,31 +478,59 @@ def encode_boxes(anchors, boxes, input_shape, n_classes):
             anchor_boxes = boxes[0]
             offsets = 0
 
-        cls_id = anchor_boxes[:,0].astype(np.int32)   # [3N,], cls_id
-        anchor_id = anchor_boxes[:,-1].astype(np.int32)   # [3N,], anchor_id
-        grid_xy = np.floor(anchor_boxes[:,[1,2]] + offsets).astype(np.int32)   # [3N,2], grid_id
-        grid_x, grid_y = grid_xy[:,0], grid_xy[:,1]
+        a = anchor_boxes[:,-1].astype(np.int32)   # [3N,1]
+        corresponding_anchors = anchors[i][a]    # [3N,2]
+        grids_xy = np.floor(anchor_boxes[:,[1,2]] + offsets)   # [3N,2]
+        grids_wh = anchor_boxes[:,[3,4]]
+        regress_target_xy = anchor_boxes[:,[1,2]] - grids_xy                 # regress grid distance
+        regress_target_wh = grids_wh * strides[i] / corresponding_anchors    # regress ratio
+        indices.append([a, grid_xy])
 
-        # onehot cls targets
-        grid_id = [grid_y,grid_x,anchor_id,cls_id]
-        targets_cls = np.zeros((grid_h,grid_w,nA,n_classes+1))   # [h,w,a,c+1]
-        targets_cls[grid_id] = 1
-        giou_id = -np.ones_like(cls_id)
-        grid_id = [grid_y,grid_x,anchor_id,giou_id]
-        targets_cls[grid_id] = 1   # giou between predict box and gt box in running time
+        cls_targets.append.append(anchor_boxes[:,[0]])
+        regress_targets.append(np.concatenate([regress_target_xy,regress_target_wh], axis=1))
 
-        # relative regression targets
-        targets_box = np.zeros((grid_h,grid_w,nA,4))    # [h,w,a,4]
-        grid_id = [grid_y,grid_x,anchor_id]
-        corresponding_anchors = anchors[i][anchor_id]    # [3N,2]
-        grid_wh = anchor_boxes[:,[3,4]]
-        regress_target_xy = anchor_boxes[:,[1,2]] - grid_xy                 # regress grid distance
-        regress_target_wh = grid_wh*strides[i] / corresponding_anchors      # regress ratio, [3N,2]
-        targets_box[grid_id] = np.concatenate([regress_target_xy,regress_target_wh], axis=1)
+        return cls_targets, regress_targets
 
-        targets.append(np.concatenate([targets_cls,targets_box],axis=-1))   # [b,h,w,cls+1+4]
 
-    return targets
+def decode_preds(anchors, pred_offsets, xy_indices):
+    # anchors, [N,2], gather from [b,h,w,nA,conf_dim]
+    # pred_offsets, [N,4]
+    # xy_indices, [N,2]
+    xc_offset = np.sigmoid(pred_offsets[:,0]) * 2 - 0.5
+    yc_offset = np.sigmoid(pred_offsets[:,1]) * 2 - 0.5
+    w_ratio = (np.sigmoid(pred_offsets[:,2]) * 2)**2    # *scale ?
+    h_ratio = (np.sigmoid(pred_offsets[:,3]) * 2)**2    # *scale ?
+
+    boxes_xc = xy_indices[:,0] + xc_offset
+    boxes_yc = xy_indices[:,1] + yc_offset
+
+    boxes_w = anchors[:,0] * w_ratio
+    boxes_h = anchors[:,1] * h_ratio
+
+    boxes = np.stack([boxes_xc,boxes_yc,boxes_w,boxes_h], axis=1)
+
+    return boxes
+
+
+def generate_anchors(anchor_scales, anchor_ratios, strides):
+    anchors = np.array(anchor_scales).reshape((-1,1)).astype(np.float32)
+    anchors = np.tile(anchors, (len(anchor_ratios),2))
+
+    factor = np.tile(np.array(anchor_ratios).reshape((-1,1)), len(anchor_scales)).reshape((-1, 1))
+
+    anchors /= np.sqrt(factor)
+    anchors[...,:1] *= factor     # anchors for a single level, N,2
+
+    n_anchors = len(anchor_scales) * len(anchor_ratios)
+    n_levels = len(strides)
+
+    # anchors = np.tile(anchors, (1,n_levels))   # N,2L
+    # stride_scale = np.tile(np.array(strides).reshape((-1,1)), (1,2)).reshape((1,-1))
+    # anchors = (anchors * stride_scale).reshape((n_anchors,2,n_levels)).transpose((2,0,1)).reshape((-1,2))
+
+    anchors_all = [anchors*i for i in strides]
+
+    return anchors_all    # list of [N,2], wh
 
 
 if __name__ == '__main__':
@@ -531,66 +538,30 @@ if __name__ == '__main__':
     from config import get_config
 
     cfg = get_config(None)
+    dataset_train = CustomDataset(cfg)
 
-    data_generator = dataSequence(cfg, augment=True, rect=False)
+    print('len dataset: ', len(dataset_train))
 
-    for idx, [img_batch, box_batch] in enumerate(data_generator):
+    dataloader = build_loader(cfg)
 
-        # # v1: raw boxes
-        # print(img_batch.shape, box_batch.shape)
-        # batch_size = len(img_batch)
-        # for i in range(batch_size):
+    print('len dataloader: ',len(dataloader))
 
-        #     canvas = img_batch[i].copy()
-        #     canvas_h, canvas_w = canvas.shape[:2]
-        #     for b in box_batch[i]:
-        #         clsid, xc, yc, w, h = b
-        #         cv2.rectangle(canvas, (int((xc-w/2.)*canvas_w), int((yc-h/2.)*canvas_h)),
-        #                       (int((xc+w/2.)*canvas_w), int((yc+h/2.)*canvas_h)),
-        #                       (0,0,255), 2)
-        #     cv2.imshow('tmp', canvas)
-        #     cv2.waitKey(0)
-
-        # v2: encoded boxes
-        print(img_batch.shape, len(box_batch), box_batch[0].shape)
-        batch_size = len(img_batch)
-        n_classes = box_batch[0].shape[-1] - 5
-        anchors = cfg.ANCHOR.ANCHORS
-        strides = [8,16,32]
-        nL = len(box_batch)
-        # for each sample
-        for i in range(batch_size):
-            canvas = img_batch[i].copy()
-            # for each feature level
-            for l in range(nL):
-                box_batch_per_level = box_batch[l][i]
-                grid_h, grid_w = box_batch_per_level.shape[:2]
-                # canvas = img_batch[i].copy()
-                # canvas = cv2.resize(img_batch[i], (grid_h, grid_w))
-
-                indices = np.where(box_batch_per_level[...,n_classes]>0)   # [h,w,a] indices
-                gt_offsets = box_batch_per_level[indices]   # [N,cls+1+4]
-                corresponding_y = np.arange(grid_h)[indices[0]]   # grid_y, [N,]
-                corresponding_x = np.arange(grid_w)[indices[1]]   # grid x, [N,]
-                corresponding_anchors = anchors[l][indices[2]]    # [N,2]
-
-                # decode: from grid-level xy_offset, abs-level wh_ratio
-                # box_xc = (corresponding_x + gt_offsets[:,n_classes+1]) * strides[l]
-                # box_yc = (corresponding_y + gt_offsets[:,n_classes+2]) * strides[l]
-                box_xc = corresponding_x * strides[l]
-                box_yc = corresponding_y * strides[l]
-                box_w = gt_offsets[:,n_classes+3] * corresponding_anchors[:,0]
-                box_h = gt_offsets[:,n_classes+4] * corresponding_anchors[:,1]
-
-                for y,x,w,h in zip(box_yc,box_xc,box_w,box_h):
-                    cv2.circle(canvas, (int(x),int(y)), 3, (0,0,255), 3)
-                    cv2.rectangle(canvas, (int(x-w/2), int(y-h/2)), (int(x+w/2), int(y+h/2)), (0,0,255), 3)
+    for i, data in enumerate(dataloader):
+        imgs, labels, _, _ = data
+        batch_img = imgs.cpu().numpy().transpose((0,2,3,1))
+        batch_labels = labels.numpy()
+        print(batch_img.shape, batch_labels.shape)
+        for i in range(len(batch_img)):
+            canvas = batch_img[i].copy()
+            canvas_h, canvas_w = canvas.shape[:2]
+            boxes = batch_labels[batch_labels[:,0]==i]
+            for b in boxes:
+                clsid, xc, yc, w, h = b[1:]
+                cv2.rectangle(canvas, (int((xc-w/2.)*canvas_w), int((yc-h/2.)*canvas_h)),
+                              (int((xc+w/2.)*canvas_w), int((yc+h/2.)*canvas_h)),
+                              (0,0,255), 2)
             cv2.imshow('tmp', canvas)
             cv2.waitKey(0)
-
-        if idx>10:
-            break
-
 
 
 

@@ -25,10 +25,10 @@ class Conv(Model):
         if self.act:
             self.mish = Activation(mish)
 
-    def call(self, x):
+    def call(self, x, training=None):
 
         x = self.conv(x)
-        x = self.bn(x)
+        x = self.bn(x, training=training)
         if self.act:
             x = self.mish(x)
 
@@ -56,10 +56,10 @@ class Bottleneck(Model):
         self.conv1 = Conv(mid_filters, 1, strides=1)
         self.conv2 = Conv(n_filters, 3, strides=1)
 
-    def call(self, x):
+    def call(self, x, training=None):
 
         inpt = x
-        x = self.conv2(self.conv1(x))
+        x = self.conv2(self.conv1(x,training=training),training=training)
         if self.shortcut and self.n_filters==x.shape[-1]:
             return x + inpt
         else:
@@ -91,22 +91,22 @@ class BottleneckCSP(Model):
             self.tmp = Bottleneck(mid_filters, shortcut, expand_ratio=1.0)
             self.bottlenecks.append(self.tmp)
 
-    def call(self, x):
+    def call(self, x, training=None):
 
         # residual path
-        y1 = self.conv1(x)
+        y1 = self.conv1(x, training=training)
         for b in self.bottlenecks:
             y1 = b(y1)
-        y1 = self.conv3(y1)
+        y1 = self.conv3(y1, training=training)
 
         # id path
         y2 = self.conv2(x)
 
         # concat
         y = concatenate([y1,y2])
-        y = self.bn(y)
+        y = self.bn(y, training=training)
         y = self.mish(y)
-        y = self.conv4(y)
+        y = self.conv4(y, training=training)
 
         return y
 
@@ -138,10 +138,10 @@ class SPPCSP(Model):
         self.mish = Activation(mish)
         self.conv7 = Conv(n_filters, 1, strides=1)
 
-    def call(self, x):
+    def call(self, x, training=training):
 
         # residual path
-        x1 = self.conv4(self.conv3(self.conv1(x)))
+        x1 = self.conv4(self.conv3(self.conv1(x,training=training),training=training),training=training)
         x2,x3,x4 = [p(x1) for p in self.poolings]
         y1 = concatenate([x1,x2,x3,x4])
         y1 = self.conv6(self.conv5(y1))
@@ -151,9 +151,9 @@ class SPPCSP(Model):
 
         # concat
         y = concatenate([y1,y2])
-        y = self.bn(y)
+        y = self.bn(y, training=training)
         y = self.mish(y)
-        y = self.conv7(y)
+        y = self.conv7(y, training=training)
 
         return y
 
@@ -180,23 +180,23 @@ class BottleneckCSP2(Model):
             self.tmp = Bottleneck(n_filters, shortcut, expand_ratio=1.0)
             self.bottlenecks.append(self.tmp)
 
-    def call(self, x):
+    def call(self, x, training=None):
 
         x = self.conv1(x)
 
         # residual path
         y1 = x
         for b in self.bottlenecks:
-            y1 = b(y1)
+            y1 = b(y1, training=training)
 
         # id path
         y2 = self.conv2(x)
 
         # concat
         y = concatenate([y1,y2])
-        y = self.bn(y)
+        y = self.bn(y, training=training)
         y = self.mish(y)
-        y = self.conv3(y)
+        y = self.conv3(y, training=training)
 
         return y
 

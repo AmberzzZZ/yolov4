@@ -5,10 +5,13 @@ import tensorflow as tf
 def compute_loss(args, nC, nA, anchors, strides=[8,16,32]):
 
     nL = len(args) // 2
-    preds = args[:nL]
-    targets = args[nL:]
+    preds = args[:nL]       # list of [b,h,w,a*(c+1+4)]
+    targets = args[nL:]     # list of [b,h,w,a,c+1+4]
 
     lcls, lbox, lobj = [], [], []
+    balance = [4.0, 1.0, 0.4]    # giou_loss scale factor
+    box_factor, cls_factor, obj_factor = 0.05, 0.5, 1.
+    giou_ratio = 1.
     for i in range(nL):
         pred_cur = preds[i]
         target_cur = targets[i]
@@ -16,34 +19,34 @@ def compute_loss(args, nC, nA, anchors, strides=[8,16,32]):
         # grid
         b, grid_h, grid_w = pred_cur.shape[:3]
         grid_coord_x, grid_coord_y = tf.meshgrid(tf.range(grid_w), tf.range(grid_h))  # [h,w]
-        grid_coord_yx = tf.cast(tf.reshape(tf.stack([grid_coord_y, grid_coord_x]), (1,grid_h,grid_w,1,2)), tf.float32)   # [1,h,w,1,2]
+        grid_coord_xy = tf.cast(tf.reshape(tf.stack([grid_coord_x, grid_coord_y]), (1,grid_h,grid_w,1,2)), tf.float32)   # [1,h,w,1,2]
 
         # reshape
         pred_cur = tf.reshape(pred_cur, (-1,grid_h,grid_w,nA,nC+1+4))
 
         # decode
         pred_probs = K.sigmoid(pred_cur[...,:nC+1])  # [b,h,w,a,c+1]
-        pred_xcyc = (K.sigmoid(pred_cur[...,-4:-2])*2-0.5 + grid_coord_yx) * strides[i]
+        pred_xcyc = (K.sigmoid(pred_cur[...,-4:-2])*2-0.5 + grid_coord_xy) * strides[i]
         pred_wh = (K.sigmoid(pred_cur[...,-2:])*2)**2 * anchors[i]
         pred_boxes = tf.concat([pred_xcyc,pred_wh], axis=-1)
 
         # iou: on positives
         iou = compute_iou(pred_boxes, target_cur[...,nC:])   # [b,h,w,a,1]
-        iou_loss = 1 - iou   # [-1,1]->[0,2]
-        lbox.append(K.sum(iou_loss, axis=[1,2,3,4]) / (K.sum(target_cur[...,nC:nC+1], axis=[1,2,3,4])+1))
 
         # regress loss: mean GIOU on positives
-        lbox.append(K.sum(iou, axis=[1,2,3,4]) / (K.sum(target_cur[...,nC])+1))
+        iou_loss = target_cur[...,nC:nC+1] * (1-iou)    # giou [-1,1]->[0,2]
+        lbox.append(balance[i] * K.sum(iou_loss, axis=[1,2,3,4]) / (K.sum(target_cur[...,nC:nC+1], axis=[1,2,3,4])+1))
 
         # cls loss: BCE on positives
-        lcls.append(bce_loss(pred_probs[...,:nC], target_cur[...,:nC]))
+        lcls.append(bce_loss(pred_probs[...,:nC], target_cur[...,:nC], mask=target_cur[...,nC]))
 
         # obj loss: BCE on all
-        lobj.append(bce_loss(pred_probs[...,:nC:nC+1], tf.stop_gradient(iou)))
+        tobj = target_cur[...,nC:nC+1] * (1-giou_ratio) + giou_ratio * K.clip(tf.stop_gradient(iou),0,1)
+        lobj.append(bce_loss(pred_probs[...,:nC:nC+1], tobj))
 
-    lcls = tf.add_n(lcls)   # [b,]
-    lbox = tf.add_n(lbox)
-    lobj = tf.add_n(lobj)
+    lcls = tf.add_n(lcls) * cls_factor   # [b,]
+    lbox = tf.add_n(lbox) * box_factor
+    lobj = tf.add_n(lobj) * obj_factor
 
     loss = lcls + lbox + lobj
     loss = tf.Print(loss, [lcls,lbox,lobj], message='loss cls, box, obj')
@@ -51,11 +54,16 @@ def compute_loss(args, nC, nA, anchors, strides=[8,16,32]):
     return loss
 
 
-def bce_loss(pred, gt):
+def bce_loss(pred, gt, mask=None):
 
     pt = 1 - K.abs(gt-pred)
     pt = K.clip(pt, K.epsilon(), 1-K.epsilon())
     loss = -K.log(pt)
+    if mask is not None:   # [b,h,w,a,cls] condition
+        mask = K.expand_dims(mask, axis=4)
+        nC = K.int_shape(pt)[-1]
+        mask = tf.tile(mask, [1,1,1,1,nC])
+        return K.sum(loss*mask, axis=[1,2,3,4]) / (K.sum(mask,axis=[1,2,3,4])+1.)
     return K.mean(loss, axis=[1,2,3,4])
 
 

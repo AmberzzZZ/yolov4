@@ -93,6 +93,12 @@
     syncBN
 
 
+### test stage
+    
+    BN inf/nan issue
+    module类继承模型，要显示声明training=1，这个问题没完全理解，但是work，是stackoverflow上看到的解决方案
+
+
 ### data
   
     model strides: output levels, 如P5就是[8,16,32]，P6是[8,16,32,64]
